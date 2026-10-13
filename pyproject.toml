@@ -1,0 +1,15 @@
+[project]
+name = "sedft"
+version = "0.1.0"
+description = "Read dimensions, styles and sheets from Solid Edge draft (.dft) files"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["olefile"]
+license = "MIT"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["sedft"]
