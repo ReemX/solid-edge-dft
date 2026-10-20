@@ -175,3 +175,18 @@ inconsistently and does not follow MeasurementAxisEx.
   Fault injection (random truncation of 7 object classes, 160 runs): no crash.
 - Extra validation: the 90 drafts shipped with SE 2026 (templates, libraries, Training):
   1,106 styles and 47 dims byte-exact, ordinate origins "X1"/"Y1" match the sheet.
+
+## 11. Vault drawings (2026-10-20)
+Checked against the sheet picture of 9 production drawings (SE ST-era to 2026):
+- **Rounding, RoundUp 2 (half-even)**: a near-tie is a tie. Inch sizes land on ties in mm and are
+  stored with float noise on either side (19.05 as 19.04999999 or 19.05000000293); SE draws 19.0
+  for both, 4.8 for 4.75, 19.0 for 18.95. The window here is 1e-6 of the last shown digit.
+  **Half-up (RoundUp 1)** only nudges an exact tie by 1e-10: 325.49999999895 is drawn 325.
+- **Display 8 (blank)**: the value is hidden. SE draws only the strings: superfix above,
+  prefix + suffix, subfix below. Drafters type whole sizes there (`%DI 5.0 %PM0.1`), or a thread
+  over a depth. A blank dimension with no strings draws only its lines.
+- **Text codes** drawn as: `%DI` ⌀, `%PM` ±, `%DG` °, `%SQ` □, `%DP` ↧ (depth). `%TS` is the
+  thread size, filled from the hole feature ("1/4-28 UNF"), not from the dimension.
+- **Not printed**: a dimension owned by no sheet, or one dragged off the paper. The paper is the
+  extent of the background sheet's Line objects (its border: A2 594x420, A3 420x297, to 0.5 mm).
+  The reader reports `position` (mean of the sheet points, mm) and `printed`.

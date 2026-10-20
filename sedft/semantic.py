@@ -24,7 +24,19 @@ DISPLAY_TYPES = {1: "nominal", 2: "tolerance", 3: "classFit", 4: "limits", 5: "b
 AXIS_MODES = {1: "default", 2: "implied", 3: "explicit", 4: "coordinate"}
 LINEAR_UNITS = {1: ("ftin", 1 / 0.0254), 2: ("m", 1.0), 3: ("mm", 1000.0), 4: ("cm", 100.0),
                 5: ("in", 1 / 0.0254), 6: ("ft", 1 / 0.3048)}
-EPS = 1e-10  # GetDistanceTolerance() stand-in; only nudges exact .5 ties upward
+EPS = 1e-10  # GetDistanceTolerance() stand-in; half-up rounding nudges exact .5 ties up by it
+# Half-even rounding (RoundUp 2) counts a near-tie as a tie, in units of the last shown digit:
+# 19.05 mm stored as 19.04999999 or 19.05000000293 is drawn 19.0 (vault sheets, 2026-10-20).
+# Half-up does not: 325.49999999895 is drawn 325 (corpus, JIS style RoundUp 1).
+TIE = 1e-6
+# Text codes in prefix/suffix strings as SE draws them (vault sheets). Hole-callout codes
+# (%HS, %HD, %TS, ...) take their text from the hole feature and stay as they are.
+TEXT_CODES = {"%DI": "\u2300", "%PM": "\u00b1", "%DG": "\u00b0", "%SQ": "\u25a1", "%DP": "\u21a7"}
+PAPER_MARGIN = 10.0  # mm a dimension may sit outside the border and still be on the paper
+
+
+def decode_text_codes(t):
+    return re.sub(r"%(DI|PM|DG|SQ|DP)", lambda m: TEXT_CODES[m.group()], t)
 
 TWO_PI, HALF_PI, THREE_HALF_PI = 2 * math.pi, math.pi / 2, 3 * math.pi / 2
 
@@ -115,14 +127,16 @@ def display_value(d):
     return v, notes
 
 
-def round_text(x, code, delim, lead, trail):
+def round_text(x, code, delim, lead, trail, even=False):
     """Roundoff code (DimDecimalRoundOffTypeConstants) -> text, SE rules."""
     if code in (1, 2):
         step = 10 if code == 1 else 1
+        if even:
+            return str(_round_int(x / step, True) * step)
         n = int(step * 0.5 + x)
         return str(n - n % step)
     dec = max(code - 2, 0)
-    s = "%.*f" % (dec, x + EPS)
+    s = "%.*f" % (dec, _round_int(x * 10 ** dec, True) / 10 ** dec if even else x + EPS)
     if dec:
         sep = {1: ".", 2: ",", 3: " "}.get(delim, ".")
         s = s[: len(s) - dec - 1] + sep + s[len(s) - dec:]
@@ -136,11 +150,15 @@ def round_text(x, code, delim, lead, trail):
 
 
 def _round_int(x, even):
-    """Round to int; SE uses round-half-even when RoundUp member (+0x9e) == 2."""
-    n = math.floor(x + 0.5)
-    if even and abs(x + 0.5 - n) < 1e-9 and n % 2:
-        n -= 1
-    return int(n)
+    """Round to int: half up, or half to even (ties within TIE) when the RoundUp member
+    (+0x9e) is 2 -- production templates often set 2 on every style."""
+    if not even:
+        return int(math.floor(x + 0.5))
+    lo = math.floor(x)
+    frac = x - lo
+    if abs(frac - 0.5) < TIE:
+        return int(lo if lo % 2 == 0 else lo + 1)
+    return int(lo + 1 if frac > 0.5 else lo)
 
 
 def dms_text(deg, code, even):
@@ -198,10 +216,12 @@ def value_text(t, v, style):
         if units == 2:  # radians
             r = math.radians(deg)
             return round_text(r, style.get("AngularDecimalRoundOff", 2), style.get("Delimiter", 1),
-                              style.get("PrimaryLeadingZeros", 1), style.get("PrimaryTrailingZeros", 1)), r
+                              style.get("PrimaryLeadingZeros", 1), style.get("PrimaryTrailingZeros", 1),
+                              even), r
         code = style.get("AngularDecimalRoundOff", 2)
         return round_text(deg, code, style.get("Delimiter", 1),
-                          style.get("PrimaryLeadingZeros", 1), style.get("PrimaryTrailingZeros", 1)) + "\u00b0", deg
+                          style.get("PrimaryLeadingZeros", 1), style.get("PrimaryTrailingZeros", 1),
+                          even) + "\u00b0", deg
     unit, k = LINEAR_UNITS.get(style.get("PrimaryUnits", 3), ("mm", 1000.0))
     x = abs(v) * k
     return linear_text(x, style), x
@@ -218,7 +238,7 @@ def linear_text(x, style):
         if frac:
             return fraction_text(val, style.get("PrimaryFractionRoundOff", 5), even)
         return round_text(val, style.get("PrimaryDecimalRoundOff", 4), style.get("Delimiter", 1),
-                          style.get("PrimaryLeadingZeros", 1), style.get("PrimaryTrailingZeros", 1))
+                          style.get("PrimaryLeadingZeros", 1), style.get("PrimaryTrailingZeros", 1), even)
 
     if style.get("PrimaryUnits", 3) == 1:  # feet-inches
         maxsub = style.get("MaximumSubunits", 12) or 12
@@ -275,6 +295,14 @@ def extract(path):
         bg = struct.unpack_from("<I", s.body(p), 0)[0]
         for sh in own.get(oid, []):
             background[sh] = bg
+    # The paper of each working sheet: the extent of its background's lines (the border), mm.
+    paper = {}
+    for sh, bg in background.items():
+        pts = [g for m in lists.get(bg, []) if (g := line_geom(s, m))]
+        if pts:
+            xs = [v * 1000 for g in pts for v in (g[0], g[2])]
+            ys = [v * 1000 for g in pts for v in (g[1], g[3])]
+            paper[sh] = (min(xs), min(ys), max(xs), max(ys))
     # Text boxes: f64 x, f64 y (sheet metres), GUserText.
     boxes = {}
     for p, oid in s.of_class("CLSID_JTextBox"):
@@ -352,6 +380,19 @@ def extract(path):
         lo = layer_of.get(oid)
         ent["layer"] = lyr[lo][0] if lo else None
         ent["visible"] = not (lo and lo in hidden.get(sh, set()))
+        # Mean of the stored sheet points, mm: where the dimension sits.
+        xy = [(q["d"][k], q["d"][k + 1]) for q in d.get("geom", []) for k in (0, 2)
+              if math.isfinite(q["d"][k]) and math.isfinite(q["d"][k + 1])]
+        if xy:
+            ent["position"] = [sum(x for x, _ in xy) / len(xy) * 1000, sum(y for _, y in xy) / len(xy) * 1000]
+        # Printed: on a sheet, on a visible layer, and on the paper (SE lets a dimension be
+        # dragged off the border; it is kept but never printed).
+        work = view_parent.get(sh, sh)
+        box = paper.get(work)
+        pos = ent.get("position")
+        ent["printed"] = ent["sheet"] is not None and ent["visible"] and not (
+            box and pos and not (box[0] - PAPER_MARGIN <= pos[0] <= box[2] + PAPER_MARGIN
+                                 and box[1] - PAPER_MARGIN <= pos[1] <= box[3] + PAPER_MARGIN))
         if t in (1, 8, 9, 11) and "d1928" in d:
             ax = [d["d1928"], d["d1930"]]
             ent["axis"] = ax
@@ -423,12 +464,22 @@ def extract(path):
         elif t in (8, 11) and d["slots"].get(0xC) and abs(num or 0) < 1e-9 \
                 and style.get("DisplayCoordinateOriginText", 0):
             shown = d["slots"][0xC]          # ordinate origin label ("X1")
-        if shown is not None and (texts.get("prefix") or texts.get("suffix")):
+        if a["disp"] == 8:
+            # Blank: the value is hidden; SE draws only the typed strings, superfix above and
+            # subfix below (vault sheets: "\u2300 5.0 \u00b10.1", a thread over a depth).
+            line = (texts.get("prefix", "") + texts.get("suffix", "")).strip()
+            ent["displayText"] = decode_text_codes(" ".join(
+                x for x in (texts.get("superfix", "").strip(), line, texts.get("subfix", "").strip()) if x))
+            if not ent["displayText"]:
+                ent["printed"] = False  # nothing but the dimension lines
+            if re.search(r"%[A-Z][A-Z0-9]", ent["displayText"]):
+                notes = notes + ["unresolvedTextCode"]
+        elif shown is not None and (texts.get("prefix") or texts.get("suffix")):
             full = texts.get("prefix", "") + shown + texts.get("suffix", "")
             full = full.replace("%HS", " " + shown if "%HS" in texts.get("prefix", "") else shown)
             if "%HS" in texts.get("prefix", ""):
                 full = texts["prefix"].replace("%HS", " ") + shown + texts.get("suffix", "")
-            ent["displayText"] = full.strip()
+            ent["displayText"] = decode_text_codes(full.strip())
             if re.search(r"%[A-Z][A-Z0-9]", ent["displayText"]):
                 notes = notes + ["unresolvedTextCode"]
         elif shown != text:
